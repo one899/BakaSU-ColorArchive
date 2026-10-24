@@ -34,15 +34,10 @@ jobs:
           path: src
           fetch-depth: 0
 
-      - name: Apply ColorArchive manager patches
+      - name: Show source info (official, no patches)
         run: |
           set -x
-          F=src/manager/app/src/main/java/org/bakasu/bakasu/data/kernel/KernelRepository.kt
-          if grep -q 'if (kernelVersion.isGKI()) Natives.isLkmMode else null' "$F"; then
-            sed -i 's/lkmMode = ksuVersion?.let { if (kernelVersion.isGKI()) Natives.isLkmMode else null },/lkmMode = ksuVersion?.let { Natives.isLkmMode },/' "$F"
-            echo "patched lkmMode"
-          fi
-          grep -n 'lkmMode' "$F" | head -3
+          echo "commit: $(git -C src rev-parse HEAD)"
           echo "commit count: $(git -C src rev-list --count HEAD)"
           echo "expected versionCode: $(( $(git -C src rev-list --count HEAD) + 30700 ))"
 
