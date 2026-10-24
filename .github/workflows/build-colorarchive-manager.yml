@@ -1,29 +1,57 @@
 name: Build ColorArchive Manager (BakaSU)
 on:
   workflow_dispatch:
-    inputs:
-      version_code:
-        description: 'manager versionCode override'
-        required: false
-        default: '35337'
+  push:
+    tags: ['v*']
 
 jobs:
   build:
-    name: Build BakaSU manager APK
+    name: Build signed manager APK
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout assets (keystore + hash script)
+        uses: actions/checkout@v6
         with:
+          fetch-depth: 1
+          sparse-checkout: |
+            .github
+
+      - name: Read pinned KSU commit from kernel repo
+        run: |
+          set -x
+          PIN_URL="https://raw.githubusercontent.com/one899/android_kernel_oneplus_sm8350_9rt_295bpf/p0/lkm/.github/ksu_pin.txt"
+          SHA=$(curl -fsSL "$PIN_URL" | tr -d '\r\n' | sed 's/^KSU_SHA=//')
+          if [ -z "$SHA" ]; then echo "pin missing, fallback to main"; SHA=main; fi
+          echo "KSU_SHA=$SHA" >> $GITHUB_ENV
+          echo "using KSU ref: $SHA"
+
+      - name: Checkout BakaSU at pinned commit
+        uses: actions/checkout@v6
+        with:
+          repository: Baka-SU/BakaSU
+          ref: ${{ env.KSU_SHA }}
+          path: src
           fetch-depth: 0
 
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
+      - name: Apply ColorArchive manager patches
+        run: |
+          set -x
+          F=src/manager/app/src/main/java/org/bakasu/bakasu/data/kernel/KernelRepository.kt
+          if grep -q 'if (kernelVersion.isGKI()) Natives.isLkmMode else null' "$F"; then
+            sed -i 's/lkmMode = ksuVersion?.let { if (kernelVersion.isGKI()) Natives.isLkmMode else null },/lkmMode = ksuVersion?.let { Natives.isLkmMode },/' "$F"
+            echo "patched lkmMode"
+          fi
+          grep -n 'lkmMode' "$F" | head -3
+          echo "commit count: $(git -C src rev-list --count HEAD)"
+          echo "expected versionCode: $(( $(git -C src rev-list --count HEAD) + 30700 ))"
+
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
 
-      - name: Set up Android SDK (use preinstalled)
+      - name: Android SDK
         run: |
           set -x
           SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
@@ -31,74 +59,57 @@ jobs:
           echo "ANDROID_SDK_ROOT=$SDK" >> $GITHUB_ENV
           SDKMAN=$(find "$SDK/cmdline-tools" -name sdkmanager -type f 2>/dev/null | head -1)
           yes | "$SDKMAN" --licenses > /dev/null 2>&1 || true
-          "$SDKMAN" --install "platforms;android-36" "build-tools;36.1.0" "ndk;29.0.14206865" 2>&1 | tail -6
-
-      - name: Patch manager version
-        run: |
-          cd .
-          grep -n 'managerVersionCode' manager/build.gradle.kts
-          echo "使用自然版本号（30000 + commitCount + 700），与内核 KSU_VERSION 同公式"; echo "commit count: $(git rev-list --count HEAD)"
-          grep -n 'managerVersionCode' manager/build.gradle.kts
+          "$SDKMAN" --install "platforms;android-36" "build-tools;36.1.0" "ndk;29.0.14206865" 2>&1 | tail -5
 
       - name: Restore keystore
         run: |
           base64 -d .github/manager/ksu-release.jks.b64 > /tmp/ksu.jks
           keytool -list -keystore /tmp/ksu.jks -storepass one899ksu 2>&1 | head -4
 
-      - name: Build release APK
+      - name: Build APK
         env:
           KEYSTORE_FILE: /tmp/ksu.jks
           KEYSTORE_PASSWORD: one899ksu
           KEY_ALIAS: ksu
           KEY_PASSWORD: one899ksu
         run: |
-          cd .
-          cd manager
+          cd src/manager
           chmod +x gradlew
           ./gradlew --no-daemon :app:assembleRelease \
             -PKEYSTORE_FILE="$KEYSTORE_FILE" \
             -PKEYSTORE_PASSWORD="$KEYSTORE_PASSWORD" \
             -PKEY_ALIAS="$KEY_ALIAS" \
-            -PKEY_PASSWORD="$KEY_PASSWORD" 2>&1 | tail -50
+            -PKEY_PASSWORD="$KEY_PASSWORD" 2>&1 | tail -40
           ls -l app/build/outputs/apk/release/ 2>/dev/null || true
 
-      - name: Inject libksud.so + sign with our keystore
+      - name: Inject libksud.so and sign
         env:
           KS_PASS: one899ksu
           KS_ALIAS: ksu
         run: |
           set -x
           BT=$(ls -d "$ANDROID_HOME/build-tools/"*/ | sort -V | tail -1)
-          echo "build-tools: $BT"
-          APK=$(find manager -name '*-arm64-v8a-release.apk' | head -1)
+          APK=$(find src/manager -name '*-arm64-v8a-release.apk' | head -1)
           echo "base apk: $APK"
-          # 1) 从官方 APK 取 libksud.so（BakaSU 官方 CI 用 cargo 编出来塞进去的）
           curl -sSL -o official.apk "https://github.com/Baka-SU/BakaSU/releases/download/v4.2.0-rc3/ReSukiSU_v4.2.0-rc3_35171-arm64-v8a-release.apk"
           mkdir -p libs && unzip -o -q official.apk 'lib/*' -d libs
-          ls -l libs/lib/*/ | head -20
-          # 2) 注入 libksud.so —— 只追加条目，不重打整包（否则 resources.arsc 被压缩，R+ 拒装）
           cp -f "$APK" injected.apk
           mkdir -p lib/arm64-v8a
           cp -f libs/lib/arm64-v8a/libksud.so lib/arm64-v8a/libksud.so
           zip -u -0 injected.apk lib/arm64-v8a/libksud.so
-          unzip -l injected.apk | grep -E 'libksud|resources.arsc'
-          ls -l injected.apk
-          # 3) zipalign + 用我们的 keystore 签名
           "${BT}zipalign" -f -p 4 injected.apk aligned.apk
-          "${BT}apksigner" sign --ks /tmp/ksu.jks --ks-pass "pass:$KS_PASS" --key-pass "pass:$KS_PASS" --ks-key-alias "$KS_ALIAS" --out bakasu-manager-signed.apk aligned.apk
-          "${BT}apksigner" verify --print-certs bakasu-manager-signed.apk | head -10
-          ls -l bakasu-manager-signed.apk
-      - name: Compute signature size/hash
-        run: |
-          set -x
-          ls -l bakasu-manager-signed.apk || true
-          for f in bakasu-manager-signed.apk; do
-            echo "=== $f"
-            python3 .github/manager/apk_sig_hash.py "$f" || true
-          done
+          "${BT}apksigner" sign --ks /tmp/ksu.jks --ks-pass "pass:$KS_PASS" --key-pass "pass:$KS_PASS" --ks-key-alias "$KS_ALIAS" --out BakaSU-ColorArchive-signed.apk aligned.apk
+          "${BT}apksigner" verify --print-certs BakaSU-ColorArchive-signed.apk | head -6
+          ls -l BakaSU-ColorArchive-signed.apk
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v6
+      - name: Signature size/hash + install metadata
+        run: |
+          python3 .github/manager/apk_sig_hash.py BakaSU-ColorArchive-signed.apk || true
+          echo "=== 内核应使用的变量 ==="
+          echo "KSU_EXPECTED_SIZE=$(python3 .github/manager/apk_sig_hash.py BakaSU-ColorArchive-signed.apk | grep SIZE= | cut -d= -f2)"
+          echo "KSU_EXPECTED_HASH=$(python3 .github/manager/apk_sig_hash.py BakaSU-ColorArchive-signed.apk | grep '^HASH=' | cut -d= -f2)"
+
+      - uses: actions/upload-artifact@v6
         with:
-          name: bakasu-manager-custom
-          path: bakasu-manager-signed.apk
+          name: bakasu-manager-signed
+          path: BakaSU-ColorArchive-signed.apk
