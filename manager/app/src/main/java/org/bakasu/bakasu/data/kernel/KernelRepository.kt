@@ -31,7 +31,7 @@ class KernelRepository(
             managerUAPIVersion = managerUapi,
             kernelUAPIVersion = kernelUapi,
             ksuFullVersion = "$fullVersion (${Natives.version}/$kernelUapi)",
-            lkmMode = ksuVersion?.let { if (kernelVersion.isGKI()) Natives.isLkmMode else null },
+            lkmMode = ksuVersion?.let { Natives.isLkmMode },
             kernelVersion = kernelVersion,
             isRootAvailable = isRootAvailable,
             isFullFeatured = isRootAvailable && runCatching { Natives.isFullFeatured() }
