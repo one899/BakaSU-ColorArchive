@@ -37,7 +37,7 @@ jobs:
         run: |
           cd .
           grep -n 'managerVersionCode' manager/build.gradle.kts
-          sed -i "s/extra\[\"managerVersionCode\"\] = 30000 + getGitCommitCount() + 700/extra[\"managerVersionCode\"] = ${{ inputs.version_code }}/" manager/build.gradle.kts
+          echo "使用自然版本号（30000 + commitCount + 700），与内核 KSU_VERSION 同公式"; echo "commit count: $(git rev-list --count HEAD)"
           grep -n 'managerVersionCode' manager/build.gradle.kts
 
       - name: Restore keystore
